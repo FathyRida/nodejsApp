@@ -1,17 +1,17 @@
 {
-  "name": "my-nodejs-app",
+  "name": "hello-world-web",
   "version": "1.0.0",
-  "description": "A simple Node.js application",
-  "main": "index.js",
+  "description": "Hello World Web Server",
+  "main": "app.js",
   "scripts": {
     "start": "node index.js",
-    "test": "mocha"
+    "test": "mocha test/test.js --exit"
   },
-  "author": "Ahmed Elfakharany",
-  "license": "MIT",
+  "dependencies": {
+    "express": "^4.17.1"
+  },
   "devDependencies": {
-    "chai": "^4.3.4",
-    "mocha": "^9.1.3"
+    "mocha": "^9.1.3",
+    "supertest": "^6.1.6"
   }
 }
-
