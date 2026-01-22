@@ -1,0 +1,80 @@
+#!/bin/bash
+
+INPUT_JSON="input_paths.json"
+OUTPUT_JSON="directory_structure.json"
+
+# Function to scan a directory
+scan_directory() {
+    local path="$1"
+    
+    # Check if path exists
+    [ -d "$path" ] || return
+    
+    # Start building folder array
+    local folders="[]"
+    
+    # Scan each folder in the path
+    for folder in "$path"/*/ ; do
+        [ -d "$folder" ] || continue
+        
+        folder_name=$(basename "$folder")
+        contents="[]"
+        
+        # Find non-log files
+        while IFS= read -r file; do
+            filename=$(basename "$file")
+            [[ "$filename" =~ \.log$ ]] && continue
+            
+            # Get extension
+            if [[ "$filename" == *.* ]]; then
+                ext=".${filename##*.}"
+            else
+                ext="no_extension"
+            fi
+            
+            # Check if directory
+            if [ -d "$file" ]; then
+                is_dir="true"
+            else
+                is_dir="false"
+            fi
+            
+            # Add to contents using jq
+            contents=$(echo "$contents" | jq --arg fn "$filename" --arg type "$ext" --argjson isdir "$is_dir" \
+                '. += [{"filename": $fn, "type": $type, "is_directory": $isdir}]')
+        done < <(find "$folder" -maxdepth 1 ! -path "$folder" 2>/dev/null)
+        
+        # Only add folder if it has contents
+        if [ "$(echo "$contents" | jq 'length')" -gt 0 ]; then
+            folders=$(echo "$folders" | jq --arg fn "$folder_name" --argjson cont "$contents" \
+                '. += [{"folder_name": $fn, "contents": $cont}]')
+        fi
+    done
+    
+    # Output path info as JSON
+    jq -n --arg p "$path" --argjson f "$folders" \
+        '{"path": $p, "folders": $f}'
+}
+
+# Main processing
+{
+    echo "["
+    first=true
+    
+    # Extract paths and process
+    jq -r '.[].path' "$INPUT_JSON" | while read -r path; do
+        result=$(scan_directory "$path")
+        
+        if [ -n "$result" ]; then
+            if [ "$first" = false ]; then
+                echo ","
+            fi
+            first=false
+            echo "$result"
+        fi
+    done
+    
+    echo "]"
+} | jq '.' > "$OUTPUT_JSON"
+
+echo "Output written to: $OUTPUT_JSON"
