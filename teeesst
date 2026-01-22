@@ -1,80 +1,134 @@
 #!/bin/bash
 
+# Input and output files
 INPUT_JSON="input_paths.json"
 OUTPUT_JSON="directory_structure.json"
 
-# Function to scan a directory
-scan_directory() {
-    local path="$1"
+# Start building the output JSON
+echo "[" > "$OUTPUT_JSON"
+
+first_path=true
+
+# Extract paths from input JSON and process each one
+grep '"path"' "$INPUT_JSON" | sed 's/.*"path": "\(.*\)".*/\1/' | while read -r path; do
     
     # Check if path exists
-    [ -d "$path" ] || return
+    if [ ! -d "$path" ]; then
+        echo "Warning: Path does not exist: $path" >&2
+        continue
+    fi
     
-    # Start building folder array
-    local folders="[]"
+    # Collect folders with non-log files first
+    folders_to_process=()
     
-    # Scan each folder in the path
     for folder in "$path"/*/ ; do
         [ -d "$folder" ] || continue
         
-        folder_name=$(basename "$folder")
-        contents="[]"
-        
-        # Find non-log files
-        while IFS= read -r file; do
+        # Check if folder has non-log files
+        has_non_log=false
+        for file in "$folder"/*; do
+            [ -e "$file" ] || continue
             filename=$(basename "$file")
-            [[ "$filename" =~ \.log$ ]] && continue
+            if [[ ! "$filename" =~ \.log$ ]]; then
+                has_non_log=true
+                break
+            fi
+        done
+        
+        if [ "$has_non_log" = true ]; then
+            folders_to_process+=("$folder")
+        fi
+    done
+    
+    # Skip path if no folders with non-log files
+    [ ${#folders_to_process[@]} -eq 0 ] && continue
+    
+    # Add comma between path entries (except for first one)
+    if [ "$first_path" = false ]; then
+        echo "," >> "$OUTPUT_JSON"
+    fi
+    first_path=false
+    
+    # Start path entry
+    echo "  {" >> "$OUTPUT_JSON"
+    echo "    \"path\": \"$path\"," >> "$OUTPUT_JSON"
+    echo "    \"folders\": [" >> "$OUTPUT_JSON"
+    
+    first_folder=true
+    
+    # Process each folder
+    for folder in "${folders_to_process[@]}"; do
+        folder_name=$(basename "$folder")
+        
+        # Collect non-log files
+        files_to_process=()
+        for file in "$folder"/*; do
+            [ -e "$file" ] || continue
+            filename=$(basename "$file")
+            # Skip .log files
+            if [[ ! "$filename" =~ \.log$ ]]; then
+                files_to_process+=("$file")
+            fi
+        done
+        
+        # Skip if no files (shouldn't happen, but safety check)
+        [ ${#files_to_process[@]} -eq 0 ] && continue
+        
+        # Add comma between folders (except for first one)
+        if [ "$first_folder" = false ]; then
+            echo "," >> "$OUTPUT_JSON"
+        fi
+        first_folder=false
+        
+        # Start folder entry
+        echo "      {" >> "$OUTPUT_JSON"
+        echo "        \"folder_name\": \"$folder_name\"," >> "$OUTPUT_JSON"
+        echo "        \"contents\": [" >> "$OUTPUT_JSON"
+        
+        first_file=true
+        
+        # List contents (excluding .log files)
+        for file in "${files_to_process[@]}"; do
+            filename=$(basename "$file")
             
-            # Get extension
+            # Get file extension
             if [[ "$filename" == *.* ]]; then
                 ext=".${filename##*.}"
             else
                 ext="no_extension"
             fi
             
-            # Check if directory
+            # Add comma between files (except for first one)
+            if [ "$first_file" = false ]; then
+                echo "," >> "$OUTPUT_JSON"
+            fi
+            first_file=false
+            
+            # Add file entry
+            echo "          {" >> "$OUTPUT_JSON"
+            echo "            \"filename\": \"$filename\"," >> "$OUTPUT_JSON"
+            echo "            \"type\": \"$ext\"," >> "$OUTPUT_JSON"
+            
             if [ -d "$file" ]; then
-                is_dir="true"
+                echo "            \"is_directory\": true" >> "$OUTPUT_JSON"
             else
-                is_dir="false"
+                echo "            \"is_directory\": false" >> "$OUTPUT_JSON"
             fi
             
-            # Add to contents using jq
-            contents=$(echo "$contents" | jq --arg fn "$filename" --arg type "$ext" --argjson isdir "$is_dir" \
-                '. += [{"filename": $fn, "type": $type, "is_directory": $isdir}]')
-        done < <(find "$folder" -maxdepth 1 ! -path "$folder" 2>/dev/null)
+            echo -n "          }" >> "$OUTPUT_JSON"
+        done
         
-        # Only add folder if it has contents
-        if [ "$(echo "$contents" | jq 'length')" -gt 0 ]; then
-            folders=$(echo "$folders" | jq --arg fn "$folder_name" --argjson cont "$contents" \
-                '. += [{"folder_name": $fn, "contents": $cont}]')
-        fi
+        echo "" >> "$OUTPUT_JSON"
+        echo "        ]" >> "$OUTPUT_JSON"
+        echo -n "      }" >> "$OUTPUT_JSON"
     done
     
-    # Output path info as JSON
-    jq -n --arg p "$path" --argjson f "$folders" \
-        '{"path": $p, "folders": $f}'
-}
+    echo "" >> "$OUTPUT_JSON"
+    echo "    ]" >> "$OUTPUT_JSON"
+    echo -n "  }" >> "$OUTPUT_JSON"
+done
 
-# Main processing
-{
-    echo "["
-    first=true
-    
-    # Extract paths and process
-    jq -r '.[].path' "$INPUT_JSON" | while read -r path; do
-        result=$(scan_directory "$path")
-        
-        if [ -n "$result" ]; then
-            if [ "$first" = false ]; then
-                echo ","
-            fi
-            first=false
-            echo "$result"
-        fi
-    done
-    
-    echo "]"
-} | jq '.' > "$OUTPUT_JSON"
+echo "" >> "$OUTPUT_JSON"
+echo "]" >> "$OUTPUT_JSON"
 
 echo "Output written to: $OUTPUT_JSON"
