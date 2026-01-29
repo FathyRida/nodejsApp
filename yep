@@ -1,18 +1,36 @@
 #!/bin/bash
 
+########################################
+# CONFIG
+########################################
+
 SRC="/applis/shared/data/nfs/ECH/raw_layer"
 DST="/data/fra/risk/rt/raw_layer"
-LOG="/tmp/raw_layer_ingest_$(date +%Y%m%d_%H%M%S).log"
+LOG="/tmp/ingest_to_hue_$(date +%Y%m%d_%H%M%S).log"
 
-echo "START $(date)" | tee -a "$LOG"
+########################################
+# START
+########################################
+
+echo "===== START $(date) =====" | tee -a "$LOG"
 echo "SRC=$SRC" | tee -a "$LOG"
 echo "DST=$DST" | tee -a "$LOG"
 
+# Check source exists
+if [ ! -d "$SRC" ]; then
+  echo "ERROR: Source directory not found: $SRC" | tee -a "$LOG"
+  exit 1
+fi
+
 cd "$SRC" || exit 1
 
-find . -type f | while read FILE; do
+########################################
+# PROCESS FILES
+########################################
 
-    # remove leading ./
+find . -type f -name "*.parquet" | while read -r FILE; do
+
+    # Remove leading ./
     REL_PATH="${FILE#./}"
 
     SRC_FILE="$SRC/$REL_PATH"
@@ -22,13 +40,19 @@ find . -type f | while read FILE; do
     echo "--------------------------------" | tee -a "$LOG"
     echo "SRC_FILE=$SRC_FILE" | tee -a "$LOG"
     echo "DST_FILE=$DST_FILE" | tee -a "$LOG"
+    echo "DST_DIR =$DST_DIR"  | tee -a "$LOG"
 
-    # create target directory in HDFS
-    hdfs dfs -mkdir -p "$DST_DIR"
+    # Create directory in HDFS if missing
+    hdfs dfs -test -d "$DST_DIR" || hdfs dfs -mkdir -p "$DST_DIR"
 
-    # upload file
+    # Upload parquet into Hue (HDFS)
     hdfs dfs -put -p -f "$SRC_FILE" "$DST_FILE"
 
 done
 
-echo "END $(date)" | tee -a "$LOG"
+########################################
+# END
+########################################
+
+echo "===== END $(date) =====" | tee -a "$LOG"
+echo "Log file: $LOG"
