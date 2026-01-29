@@ -1,0 +1,48 @@
+#!/bin/bash
+
+########################################
+# CONFIG
+########################################
+
+SRC="/applis/shared/data/nfs/ECH/raw_layer"
+DST="/data/fra/risk/rt/raw_layer"
+LOG="/tmp/ingest_raw_layer_$(date +%Y%m%d_%H%M%S).log"
+
+########################################
+# START
+########################################
+
+echo "==== START INGEST $(date) ====" | tee -a "$LOG"
+echo "Source : $SRC" | tee -a "$LOG"
+echo "Target : $DST" | tee -a "$LOG"
+
+# Check source
+if [ ! -d "$SRC" ]; then
+  echo "ERROR: Source not found $SRC" | tee -a "$LOG"
+  exit 1
+fi
+
+# Create root in HDFS
+hdfs dfs -mkdir -p "$DST"
+
+########################################
+# COPY FILES
+########################################
+
+cd "$SRC" || exit 1
+
+find . -type d | while read dir; do
+    hdfs dfs -mkdir -p "$DST/$dir"
+done
+
+find . -type f | while read file; do
+    echo "Copy: $file" | tee -a "$LOG"
+    hdfs dfs -put -p -f "$SRC/$file" "$DST/$file"
+done
+
+########################################
+# END
+########################################
+
+echo "==== END INGEST $(date) ====" | tee -a "$LOG"
+echo "Log file: $LOG"
