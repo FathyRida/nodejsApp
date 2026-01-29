@@ -1,48 +1,34 @@
 #!/bin/bash
 
-########################################
-# CONFIG
-########################################
-
 SRC="/applis/shared/data/nfs/ECH/raw_layer"
 DST="/data/fra/risk/rt/raw_layer"
-LOG="/tmp/ingest_raw_layer_$(date +%Y%m%d_%H%M%S).log"
+LOG="/tmp/raw_layer_ingest_$(date +%Y%m%d_%H%M%S).log"
 
-########################################
-# START
-########################################
-
-echo "==== START INGEST $(date) ====" | tee -a "$LOG"
-echo "Source : $SRC" | tee -a "$LOG"
-echo "Target : $DST" | tee -a "$LOG"
-
-# Check source
-if [ ! -d "$SRC" ]; then
-  echo "ERROR: Source not found $SRC" | tee -a "$LOG"
-  exit 1
-fi
-
-# Create root in HDFS
-hdfs dfs -mkdir -p "$DST"
-
-########################################
-# COPY FILES
-########################################
+echo "START $(date)" | tee -a "$LOG"
+echo "SRC=$SRC" | tee -a "$LOG"
+echo "DST=$DST" | tee -a "$LOG"
 
 cd "$SRC" || exit 1
 
-find . -type d | while read dir; do
-    hdfs dfs -mkdir -p "$DST/$dir"
+find . -type f | while read FILE; do
+
+    # remove leading ./
+    REL_PATH="${FILE#./}"
+
+    SRC_FILE="$SRC/$REL_PATH"
+    DST_FILE="$DST/$REL_PATH"
+    DST_DIR="$(dirname "$DST_FILE")"
+
+    echo "--------------------------------" | tee -a "$LOG"
+    echo "SRC_FILE=$SRC_FILE" | tee -a "$LOG"
+    echo "DST_FILE=$DST_FILE" | tee -a "$LOG"
+
+    # create target directory in HDFS
+    hdfs dfs -mkdir -p "$DST_DIR"
+
+    # upload file
+    hdfs dfs -put -p -f "$SRC_FILE" "$DST_FILE"
+
 done
 
-find . -type f | while read file; do
-    echo "Copy: $file" | tee -a "$LOG"
-    hdfs dfs -put -p -f "$SRC/$file" "$DST/$file"
-done
-
-########################################
-# END
-########################################
-
-echo "==== END INGEST $(date) ====" | tee -a "$LOG"
-echo "Log file: $LOG"
+echo "END $(date)" | tee -a "$LOG"
