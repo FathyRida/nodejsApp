@@ -1,58 +1,36 @@
 #!/bin/bash
 
-########################################
-# CONFIG
-########################################
+# File containing list of remote paths
+LIST_FILE="paths.txt"
 
-SRC="/applis/shared/data/nfs/ECH/raw_layer"
-DST="/data/fra/risk/rt/raw_layer"
-LOG="/tmp/ingest_to_hue_$(date +%Y%m%d_%H%M%S).log"
+# Local destination directory
+DEST_DIR="/local/download/folder"
 
-########################################
-# START
-########################################
-
-echo "===== START $(date) =====" | tee -a "$LOG"
-echo "SRC=$SRC" | tee -a "$LOG"
-echo "DST=$DST" | tee -a "$LOG"
-
-# Check source exists
-if [ ! -d "$SRC" ]; then
-  echo "ERROR: Source directory not found: $SRC" | tee -a "$LOG"
+# Check if list file exists
+if [ ! -f "$LIST_FILE" ]; then
+  echo "File $LIST_FILE not found!"
   exit 1
 fi
 
-cd "$SRC" || exit 1
+# Create destination directory if not exists
+mkdir -p "$DEST_DIR"
 
-########################################
-# PROCESS FILES
-########################################
+# Read file line by line
+while IFS= read -r REMOTE_PATH
+do
+  # Skip empty lines
+  [ -z "$REMOTE_PATH" ] && continue
 
-find . -type f -name "*.parquet" | while read -r FILE; do
+  echo "Downloading: $REMOTE_PATH"
+  
+  rclone copy "$REMOTE_PATH" "$DEST_DIR" --progress
+  
+  if [ $? -eq 0 ]; then
+    echo "Success: $REMOTE_PATH"
+  else
+    echo "Failed: $REMOTE_PATH"
+  fi
 
-    # Remove leading ./
-    REL_PATH="${FILE#./}"
+done < "$LIST_FILE"
 
-    SRC_FILE="$SRC/$REL_PATH"
-    DST_FILE="$DST/$REL_PATH"
-    DST_DIR="$(dirname "$DST_FILE")"
-
-    echo "--------------------------------" | tee -a "$LOG"
-    echo "SRC_FILE=$SRC_FILE" | tee -a "$LOG"
-    echo "DST_FILE=$DST_FILE" | tee -a "$LOG"
-    echo "DST_DIR =$DST_DIR"  | tee -a "$LOG"
-
-    # Create directory in HDFS if missing
-    hdfs dfs -test -d "$DST_DIR" || hdfs dfs -mkdir -p "$DST_DIR"
-
-    # Upload parquet into Hue (HDFS)
-    hdfs dfs -put -p -f "$SRC_FILE" "$DST_FILE"
-
-done
-
-########################################
-# END
-########################################
-
-echo "===== END $(date) =====" | tee -a "$LOG"
-echo "Log file: $LOG"
+echo "All downloads completed."
