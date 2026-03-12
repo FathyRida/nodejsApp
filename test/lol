@@ -1,0 +1,232 @@
+#!/bin/bash
+
+#############################################################
+# Oracle Control Table Updater
+# Author: DevOps Utility
+#############################################################
+
+SCRIPT_DIR=$(cd "$(dirname "$0")"; pwd)
+
+INPUT_DIR="${SCRIPT_DIR}/inputs"
+LOG_DIR="${SCRIPT_DIR}/logs"
+
+mkdir -p "$LOG_DIR"
+
+#############################################################
+# ORACLE ENV
+#############################################################
+
+export ORACLE_SID=${1}
+export ORACLE_HOME="/apps/oracle/19000/250715/rdb/std"
+export PATH=$ORACLE_HOME/bin:$PATH
+
+#############################################################
+# COLORS
+#############################################################
+
+BOLD="\033[1m"
+RESET="\033[0m"
+CYAN="\033[96m"
+YELLOW="\033[93m"
+GREEN="\033[92m"
+WHITE="\033[97m"
+DIM="\033[2m"
+RED="\033[91m"
+
+#############################################################
+# FUNCTIONS
+#############################################################
+
+print_separator() {
+echo -e "${CYAN}-------------------------------------------------------------${RESET}"
+}
+
+print_header() {
+echo ""
+print_separator
+echo -e "${CYAN}${BOLD}${WHITE} Oracle Control Table Updater ${RESET}"
+echo -e "${CYAN} SID: ${ORACLE_SID:-not set}${RESET}"
+print_separator
+echo ""
+}
+
+usage() {
+
+echo -e "${YELLOW}Usage:${RESET}"
+echo -e " $0 <ORACLE_SID> country <COUNTRY_CODE> [--dry-run] [--help]"
+echo ""
+
+echo -e "${YELLOW}Country codes:${RESET}"
+echo -e " ${GREEN}NOR SWE DNK CCF CFS FVS ${RESET}"
+echo ""
+
+echo -e "${YELLOW}Options:${RESET}"
+echo -e " --dry-run     Print generated SQL without executing"
+echo -e " --help        Show this help message"
+echo ""
+
+echo -e "${DIM}CSV format expected:${RESET}"
+echo -e "${DIM}SCHEMA,TABLENAME,FIELDNAME,FIELDVALUE,DATE,WHERE_FIELD,WHERE_VALUE${RESET}"
+
+echo -e "${DIM}Date format:${RESET}"
+echo -e "${DIM}DD/MM/YYYY${RESET}"
+
+echo ""
+
+}
+
+#############################################################
+# SQL BUILDER
+#############################################################
+
+build_sql() {
+
+schema=$1
+table=$2
+field=$3
+value=$4
+date=$5
+where_field=$6
+where_value=$7
+
+# detect datatype
+
+if [[ "$value" =~ ^[0-9]+$ ]]; then
+formatted_value=$value
+
+elif [[ "$value" =~ ^[0-9]{2}/[0-9]{2}/[0-9]{4}$ ]]; then
+formatted_value="TO_DATE('$value','DD/MM/YYYY')"
+
+else
+formatted_value="'$value'"
+fi
+
+sql="UPDATE ${schema}.${table} 
+SET ${field}=${formatted_value} 
+WHERE ${where_field}='${where_value}';"
+
+echo "$sql"
+
+}
+
+#############################################################
+# SQL EXECUTION
+#############################################################
+
+execute_sql() {
+
+SQL=$1
+
+sqlplus -s /nolog <<EOF
+connect / as sysdba
+SET HEADING OFF
+SET FEEDBACK OFF
+SET PAGESIZE 0
+SET VERIFY OFF
+
+$SQL
+
+COMMIT;
+EXIT;
+EOF
+
+}
+
+#############################################################
+# PARAMETERS PARSING
+#############################################################
+
+COUNTRY=""
+DRY_RUN=false
+
+shift
+
+while [[ $# -gt 0 ]]
+do
+
+case $1 in
+
+country)
+COUNTRY=$2
+shift 2
+;;
+
+--dry-run)
+DRY_RUN=true
+shift
+;;
+
+--help)
+usage
+exit 0
+;;
+
+*)
+echo -e "${RED}Unknown option: $1${RESET}"
+usage
+exit 1
+;;
+
+esac
+
+done
+
+#############################################################
+# VALIDATION
+#############################################################
+
+print_header
+
+if [[ -z "$COUNTRY" ]]; then
+echo -e "${RED}Country code is required${RESET}"
+usage
+exit 1
+fi
+
+CSV_FILE="${INPUT_DIR}/${COUNTRY}.csv"
+
+if [[ ! -f "$CSV_FILE" ]]; then
+echo -e "${RED}CSV file not found:${RESET} $CSV_FILE"
+exit 1
+fi
+
+LOG_FILE="${LOG_DIR}/update_${COUNTRY}_$(date +%Y%m%d_%H%M%S).log"
+
+echo -e "${GREEN}Processing CSV:${RESET} $CSV_FILE"
+echo -e "${GREEN}Log file:${RESET} $LOG_FILE"
+
+print_separator
+
+#############################################################
+# PROCESS CSV
+#############################################################
+
+while IFS=',' read -r schema table field value date where_field where_value
+do
+
+# skip empty lines
+[[ -z "$schema" ]] && continue
+
+SQL=$(build_sql "$schema" "$table" "$field" "$value" "$date" "$where_field" "$where_value")
+
+echo "$SQL" >> "$LOG_FILE"
+
+if $DRY_RUN
+then
+
+echo -e "${YELLOW}[DRY RUN]${RESET} $SQL"
+
+else
+
+echo -e "${CYAN}Executing:${RESET} $SQL"
+
+execute_sql "$SQL" >> "$LOG_FILE" 2>&1
+
+fi
+
+done < "$CSV_FILE"
+
+print_separator
+echo -e "${GREEN}Processing finished.${RESET}"
+echo -e "${GREEN}Check logs:${RESET} $LOG_FILE"
+print_separator
