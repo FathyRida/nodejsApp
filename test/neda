@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+
+# =============================================================================
+
+# oracle_updater.sh — Oracle Control Table Updater
+
+# Author: DevOps Utility
+
+# Usage:  ./oracle_updater.sh –country <code> –env <env> [–dry-run] [–help]
+
+# =============================================================================
+
+set -euo pipefail
+
+# —————————————————————————
+
+# Paths
+
+# —————————————————————————
+
+SCRIPT_DIR=”$(cd “$(dirname “$0”)”; pwd)”
+INPUT_DIR=”${SCRIPT_DIR}/inputs”
+LOG_DIR=”${SCRIPT_DIR}/logs”
+mkdir -p “${LOG_DIR}”
+
+TIMESTAMP=”$(date ‘+%Y%m%d_%H%M%S’)”
+LOG_FILE=”${LOG_DIR}/oracle_updater_${TIMESTAMP}.log”
+
+# —————————————————————————
+
+# Oracle environment
+
+# —————————————————————————
+
+export ORACLE_HOME=”/apps/oracle/19000/250715/rdb/std”
+export PATH=”${ORACLE_HOME}/bin:${PATH}”
+
+# —————————————————————————
+
+# Instance map  (COUNTRY_ENV → SID)
+
+# Format key:   uppercase(country)_uppercase(env)
+
+# —————————————————————————
+
+declare -A INSTANCE_MAP=(
+# SWE
+[“SWE_PREPROD”]=“X11436CP10”
+# Nordics / FeedVisir
+[“NOR_PREPROD”]=“X11436BP10”
+[“DNK_PREPROD”]=“X11436DP10”
+[“FVS_PREPROD”]=“X11436AP10”
+# GBR / CFS
+[“GBR_PREPROD”]=“X11436FP10”
+[“CFS_PREPROD”]=“X11436FP10”
+# CCF (two nodes)
+[“CCF_PREPROD_A”]=“XCDSIHAP10”
+[“CCF_PREPROD_B”]=“XCDSIHBP10”
+# XMETA
+[“XMETA_PREPROD_562”]=“XCDSIHCP10”
+[“XMETA_PREPROD_563”]=“XCDSIHDP10”
+# Generic country fallback
+[“COUNTRY_PREPROD”]=“X11426IP10”
+)
+
+# —————————————————————————
+
+# Defaults
+
+# —————————————————————————
+
+COUNTRY=””
+ENV=””
+DRY_RUN=false
+ORACLE_USER=”${ORACLE_USER:-/}”          # default: OS auth; override via env var
+ORACLE_PASS=”${ORACLE_PASS:-}”
+
+# —————————————————————————
+
+# Helpers
+
+# —————————————————————————
+
+log()  { echo “[$(date ‘+%Y-%m-%d %H:%M:%S’)] $*” | tee -a “${LOG_FILE}”; }
+die()  { log “ERROR: $*”; exit 1; }
+warn() { log “WARN:  $*”; }
+
+usage() {
+cat <<EOF
+Usage: $(basename “$0”) –country <CODE> –env <ENV> [OPTIONS]
+
+Reads inputs/<country>.csv and applies UPDATE statements to the
+corresponding Oracle instance.
+
+Required:
+–country CODE   Country/feed code, e.g. nor, swe, dnk, ccf, cfs, fvs, gbr
+–env     ENV    Environment key, e.g. preprod
+
+Options:
+–dry-run        Print generated SQL without executing it
+–user    USR    Oracle username (default: OS-authenticated ‘/’)
+–pass    PWD    Oracle password  (default: empty / OS-auth)
+–help           Show this help
+
+Environment variables (override defaults):
+ORACLE_USER      Oracle username
+ORACLE_PASS      Oracle password
+
+CSV format (inputs/<country>.csv):
+schema,table_name,field_name,field_value,date
+
+- date column must be: TO_DATE(‘DD/MM/YYYY’,‘dd/MM/YYYY’) or empty
+- field_value is applied as-is (quote strings in the CSV if needed)
+
+Instance map (hardcoded):
+$(for k in $(echo “${!INSTANCE_MAP[@]}” | tr ’ ’ ‘\n’ | sort); do
+printf “  %-24s → %s\n” “$k” “${INSTANCE_MAP[$k]}”
+done)
+
+Examples:
+./oracle_updater.sh –country nor –env preprod
+./oracle_updater.sh –country swe –env preprod –dry-run
+./oracle_updater.sh –country gbr –env preprod –user myuser –pass mypass
+EOF
+}
+
+# —————————————————————————
+
+# Parse arguments
+
+# —————————————————————————
+
+[[ $# -eq 0 ]] && usage && exit 0
+
+while [[ $# -gt 0 ]]; do
+case “$1” in
+–country) COUNTRY=”${2^^}”; shift 2 ;;
+–env)     ENV=”${2^^}”;     shift 2 ;;
+–dry-run) DRY_RUN=true;     shift   ;;
+–user)    ORACLE_USER=”$2”; shift 2 ;;
+–pass)    ORACLE_PASS=”$2”; shift 2 ;;
+–help|-h) usage; exit 0              ;;
+*) die “Unknown argument: $1. Use –help for usage.” ;;
+esac
+done
+
+[[ -z “${COUNTRY}” ]] && die “–country is required.”
+[[ -z “${ENV}”     ]] && die “–env is required.”
+
+# —————————————————————————
+
+# Resolve Oracle SID
+
+# —————————————————————————
+
+LOOKUP_KEY=”${COUNTRY}_${ENV}”
+ORACLE_SID=”${INSTANCE_MAP[$LOOKUP_KEY]:-}”
+
+if [[ -z “${ORACLE_SID}” ]]; then
+warn “No exact match for key ‘${LOOKUP_KEY}’.”
+# Try suffix-based partial match (e.g. CCF_PREPROD matches CCF_PREPROD_A)
+for k in “${!INSTANCE_MAP[@]}”; do
+if [[ “$k” == “${LOOKUP_KEY}_”* ]]; then
+warn “Found partial match: $k → ${INSTANCE_MAP[$k]}”
+ORACLE_SID=”${INSTANCE_MAP[$k]}”
+break
+fi
+done
+[[ -z “${ORACLE_SID}” ]] && die “No Oracle SID found for country=’${COUNTRY}’ env=’${ENV}’.”
+fi
+
+export ORACLE_SID
+log “Resolved ORACLE_SID=’${ORACLE_SID}’ for ${COUNTRY}/${ENV}”
+
+# —————————————————————————
+
+# Locate CSV
+
+# —————————————————————————
+
+CSV_FILE=”${INPUT_DIR}/${COUNTRY,,}.csv”
+[[ -f “${CSV_FILE}” ]] || die “Input file not found: ${CSV_FILE}”
+log “Reading input file: ${CSV_FILE}”
+
+# —————————————————————————
+
+# Build Oracle connect string
+
+# —————————————————————————
+
+if [[ “${ORACLE_USER}” == “/” ]]; then
+CONNECT_STR=”/”
+else
+CONNECT_STR=”${ORACLE_USER}/${ORACLE_PASS}@${ORACLE_SID}”
+fi
+
+# —————————————————————————
+
+# sqlplus runner
+
+# —————————————————————————
+
+run_sql() {
+local sql=”$1”
+local label=”${2:-sql}”
+if “${DRY_RUN}”; then
+log “[DRY-RUN] Would execute (${label}):”
+echo “${sql}” | sed ‘s/^/    /’
+return 0
+fi
+sqlplus -s “${CONNECT_STR}” <<EOF
+SET HEADING OFF FEEDBACK OFF VERIFY OFF PAGESIZE 0 TRIMSPOOL ON
+${sql}
+EXIT;
+EOF
+}
+
+# —————————————————————————
+
+# Process CSV rows
+
+# —————————————————————————
+
+# Expected header (case-insensitive): schema,table_name,field_name,field_value,date
+
+# Skip header line and blank lines.
+
+HEADER_SKIPPED=false
+ROW_NUM=0
+SUCCESS=0
+SKIPPED=0
+ERRORS=0
+
+while IFS=’,’ read -r schema table_name field_name field_value date_expr; do
+# Strip CR (Windows line endings)
+schema=”${schema//$’\r’/}”
+table_name=”${table_name//$’\r’/}”
+field_name=”${field_name//$’\r’/}”
+field_value=”${field_value//$’\r’/}”
+date_expr=”${date_expr//$’\r’/}”
+
+```
+# Skip header
+if ! "${HEADER_SKIPPED}"; then
+    HEADER_SKIPPED=true
+    continue
+fi
+
+# Skip blank lines
+[[ -z "${schema}" && -z "${table_name}" ]] && continue
+
+ROW_NUM=$(( ROW_NUM + 1 ))
+log "--- Row ${ROW_NUM}: ${schema}.${table_name}.${field_name} ---"
+
+# Validate required fields
+if [[ -z "${schema}" || -z "${table_name}" || -z "${field_name}" ]]; then
+    warn "Row ${ROW_NUM}: missing schema/table/field — skipping."
+    SKIPPED=$(( SKIPPED + 1 ))
+    continue
+fi
+
+# ------------------------------------------------------------------
+# Step 1: Retrieve current value and column data type from DB
+# ------------------------------------------------------------------
+FETCH_SQL="
+```
+
+SELECT c.data_type, t.${field_name}
+FROM   all_tab_columns c,
+${schema}.${table_name} t
+WHERE  c.owner      = UPPER(’${schema}’)
+AND    c.table_name = UPPER(’${table_name}’)
+AND    c.column_name= UPPER(’${field_name}’)
+AND    ROWNUM = 1;”
+
+```
+log "Fetching current value and data type for ${schema}.${table_name}.${field_name} ..."
+
+if "${DRY_RUN}"; then
+    log "[DRY-RUN] Would fetch: ${FETCH_SQL}"
+    DATA_TYPE="VARCHAR2"   # assume for dry-run
+    CURRENT_VAL="<unknown>"
+else
+    FETCH_RESULT="$(run_sql "${FETCH_SQL}" "fetch_meta" 2>&1)" || {
+        warn "Row ${ROW_NUM}: failed to fetch current value — skipping. Detail: ${FETCH_RESULT}"
+        ERRORS=$(( ERRORS + 1 ))
+        continue
+    }
+    DATA_TYPE="$(echo "${FETCH_RESULT}" | awk 'NR==1{print $1}')"
+    CURRENT_VAL="$(echo "${FETCH_RESULT}" | awk 'NR==1{$1=""; sub(/^ /,""); print}')"
+    log "  Current value : '${CURRENT_VAL}'"
+    log "  Column type   : '${DATA_TYPE}'"
+fi
+
+# ------------------------------------------------------------------
+# Step 2: Build the SET clause value
+# ------------------------------------------------------------------
+# Priority: if a date_expr is provided, use it directly.
+# Otherwise determine quoting from DATA_TYPE.
+if [[ -n "${date_expr}" && "${date_expr}" == TO_DATE* ]]; then
+    SET_VALUE="${date_expr}"
+else
+    case "${DATA_TYPE^^}" in
+        NUMBER|FLOAT|BINARY_FLOAT|BINARY_DOUBLE|INTEGER|INT|SMALLINT|DECIMAL|NUMERIC)
+            # Numeric — no quotes
+            SET_VALUE="${field_value}"
+            ;;
+        DATE|TIMESTAMP*)
+            # Date/timestamp without explicit TO_DATE expression — wrap
+            SET_VALUE="TO_DATE('${field_value}','DD/MM/YYYY')"
+            ;;
+        *)
+            # VARCHAR2, CHAR, NVARCHAR2, CLOB, etc. — quote
+            # Escape any embedded single-quotes
+            ESCAPED_VAL="${field_value//\'/\'\'}"
+            SET_VALUE="'${ESCAPED_VAL}'"
+            ;;
+    esac
+fi
+
+# ------------------------------------------------------------------
+# Step 3: Build the UPDATE statement
+# ------------------------------------------------------------------
+UPDATE_SQL="
+```
+
+UPDATE ${schema}.${table_name}
+SET    ${field_name} = ${SET_VALUE}
+WHERE  ${field_name} IS NOT NULL
+OR  ${field_name} IS NULL;   – update all rows; tighten WHERE as needed
+COMMIT;”
+
+```
+log "Generated SQL:"
+echo "${UPDATE_SQL}" | sed 's/^/    /' | tee -a "${LOG_FILE}"
+
+# ------------------------------------------------------------------
+# Step 4: Execute (or dry-run)
+# ------------------------------------------------------------------
+if "${DRY_RUN}"; then
+    log "[DRY-RUN] Skipping execution."
+    SUCCESS=$(( SUCCESS + 1 ))
+else
+    EXEC_RESULT="$(run_sql "${UPDATE_SQL}" "update" 2>&1)"
+    EXIT_CODE=$?
+    if [[ ${EXIT_CODE} -ne 0 ]] || echo "${EXEC_RESULT}" | grep -qi "ORA-\|SP2-"; then
+        warn "Row ${ROW_NUM}: UPDATE failed. Output:"
+        echo "${EXEC_RESULT}" | sed 's/^/    /' | tee -a "${LOG_FILE}"
+        ERRORS=$(( ERRORS + 1 ))
+    else
+        log "Row ${ROW_NUM}: UPDATE applied successfully."
+        SUCCESS=$(( SUCCESS + 1 ))
+    fi
+fi
+```
+
+done < “${CSV_FILE}”
+
+# —————————————————————————
+
+# Summary
+
+# —————————————————————————
+
+log “=============================================”
+log “Run complete.”
+log “  Rows processed : ${ROW_NUM}”
+log “  Successful     : ${SUCCESS}”
+log “  Skipped        : ${SKIPPED}”
+log “  Errors         : ${ERRORS}”
+log “  Dry-run mode   : ${DRY_RUN}”
+log “  Log file       : ${LOG_FILE}”
+log “=============================================”
+
+[[ ${ERRORS} -gt 0 ]] && exit 1
+exit 0
