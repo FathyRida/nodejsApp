@@ -72,8 +72,6 @@ declare -A INSTANCE_MAP=(
 COUNTRY=””
 ENV=””
 DRY_RUN=false
-ORACLE_USER=”${ORACLE_USER:-/}”          # default: OS auth; override via env var
-ORACLE_PASS=”${ORACLE_PASS:-}”
 
 # —————————————————————————
 
@@ -90,7 +88,7 @@ cat <<EOF
 Usage: $(basename “$0”) –country <CODE> –env <ENV> [OPTIONS]
 
 Reads inputs/<country>.csv and applies UPDATE statements to the
-corresponding Oracle instance.
+corresponding Oracle instance. Connects as the OS oracle user (no password needed).
 
 Required:
 –country CODE   Country/feed code, e.g. nor, swe, dnk, ccf, cfs, fvs, gbr
@@ -98,19 +96,13 @@ Required:
 
 Options:
 –dry-run        Print generated SQL without executing it
-–user    USR    Oracle username (default: OS-authenticated ‘/’)
-–pass    PWD    Oracle password  (default: empty / OS-auth)
 –help           Show this help
-
-Environment variables (override defaults):
-ORACLE_USER      Oracle username
-ORACLE_PASS      Oracle password
 
 CSV format (inputs/<country>.csv):
 schema,table_name,field_name,field_value,date
 
-- date column must be: TO_DATE(‘DD/MM/YYYY’,‘dd/MM/YYYY’) or empty
-- field_value is applied as-is (quote strings in the CSV if needed)
+- date column: TO_DATE(‘DD/MM/YYYY’,‘dd/MM/YYYY’) or leave empty
+- field_value: raw value; strings are auto-quoted based on column data type
 
 Instance map (hardcoded):
 $(for k in $(echo “${!INSTANCE_MAP[@]}” | tr ’ ’ ‘\n’ | sort); do
@@ -120,7 +112,7 @@ done)
 Examples:
 ./oracle_updater.sh –country nor –env preprod
 ./oracle_updater.sh –country swe –env preprod –dry-run
-./oracle_updater.sh –country gbr –env preprod –user myuser –pass mypass
+./oracle_updater.sh –country gbr –env preprod
 EOF
 }
 
@@ -137,8 +129,6 @@ case “$1” in
 –country) COUNTRY=”${2^^}”; shift 2 ;;
 –env)     ENV=”${2^^}”;     shift 2 ;;
 –dry-run) DRY_RUN=true;     shift   ;;
-–user)    ORACLE_USER=”$2”; shift 2 ;;
-–pass)    ORACLE_PASS=”$2”; shift 2 ;;
 –help|-h) usage; exit 0              ;;
 *) die “Unknown argument: $1. Use –help for usage.” ;;
 esac
@@ -184,15 +174,11 @@ log “Reading input file: ${CSV_FILE}”
 
 # —————————————————————————
 
-# Build Oracle connect string
+# Oracle connect string — OS-authenticated oracle user, no password needed
 
 # —————————————————————————
 
-if [[ “${ORACLE_USER}” == “/” ]]; then
 CONNECT_STR=”/”
-else
-CONNECT_STR=”${ORACLE_USER}/${ORACLE_PASS}@${ORACLE_SID}”
-fi
 
 # —————————————————————————
 
